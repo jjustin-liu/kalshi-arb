@@ -251,12 +251,25 @@ def monitor(port: int, host: str):
     """Start monitoring dashboard server."""
     from src.monitoring.web_server import MonitoringServer
     from src.monitoring.config import DashboardConfig
+    from src.monitoring.dashboard import DashboardManager
+    from src.monitoring.alerts import AlertManager
+    from src.monitoring.metrics_collector import MetricsCollector
 
     console.print(f"[bold green]Starting Monitoring Dashboard[/bold green]")
     console.print(f"URL: http://{host}:{port}")
 
+    # Initialize all required components
     config = DashboardConfig(host=host, port=port)
-    server = MonitoringServer(config)
+    dashboard = DashboardManager()
+    alerts = AlertManager()
+    metrics = MetricsCollector()
+
+    server = MonitoringServer(
+        dashboard=dashboard,
+        alerts=alerts,
+        metrics=metrics,
+        config=config,
+    )
 
     try:
         server.run()

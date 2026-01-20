@@ -1,18 +1,21 @@
 """Kalshi REST and WebSocket client."""
 
 import asyncio
-import hashlib
-import hmac
+import base64
 import json
 import logging
+import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncIterator, Callable, Optional
 from urllib.parse import urlencode
 
 import aiohttp
 import websockets
 from websockets.client import WebSocketClientProtocol
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
 
 from .schemas import (
     KalshiMarket,
@@ -29,27 +32,38 @@ logger = logging.getLogger(__name__)
 
 
 class KalshiAuth:
-    """Handles Kalshi API authentication."""
+    """Handles Kalshi API authentication using RSA-PSS signatures."""
 
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(self, api_key: str, private_key: str):
         self.api_key = api_key
-        self.api_secret = api_secret
+        self.private_key = self._load_private_key(private_key)
+
+    def _load_private_key(self, private_key_str: str):
+        """Load RSA private key from PEM string."""
+        return serialization.load_pem_private_key(
+            private_key_str.encode(),
+            password=None,
+            backend=default_backend(),
+        )
 
     def sign_request(
         self,
         method: str,
         path: str,
         timestamp: int,
-        body: str = "",
     ) -> str:
-        """Generate HMAC signature for request."""
-        message = f"{timestamp}{method}{path}{body}"
-        signature = hmac.new(
-            self.api_secret.encode(),
-            message.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        return signature
+        """Generate RSA-PSS signature for request."""
+        # Message format: timestamp + method + path (without query params)
+        message = f"{timestamp}{method}{path}"
+        signature = self.private_key.sign(
+            message.encode('utf-8'),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH
+            ),
+            hashes.SHA256(),
+        )
+        return base64.b64encode(signature).decode('utf-8')
 
     def get_auth_headers(
         self,
@@ -59,7 +73,7 @@ class KalshiAuth:
     ) -> dict[str, str]:
         """Get authentication headers for a request."""
         timestamp = int(time.time() * 1000)
-        signature = self.sign_request(method, path, timestamp, body)
+        signature = self.sign_request(method, path, timestamp)
 
         return {
             "KALSHI-ACCESS-KEY": self.api_key,
@@ -73,15 +87,26 @@ class KalshiRESTClient:
     """Kalshi REST API client."""
 
     DEMO_URL = "https://demo-api.kalshi.co"
-    PROD_URL = "https://trading-api.kalshi.com"
+    PROD_URL = "https://api.elections.kalshi.com"
 
     def __init__(
         self,
-        api_key: str,
-        api_secret: str,
-        env: str = "demo",
+        api_key: Optional[str] = None,
+        private_key: Optional[str] = None,
+        env: Optional[str] = None,
     ):
-        self.auth = KalshiAuth(api_key, api_secret)
+        # Load from environment if not provided
+        api_key = api_key or os.getenv("KALSHI_API_KEY")
+        private_key = private_key or os.getenv("KALSHI_PRIVATE_KEY")
+        env = env or os.getenv("KALSHI_ENV", "prod")
+
+        if not api_key or not private_key:
+            raise ValueError(
+                "Kalshi credentials required. Set KALSHI_API_KEY and "
+                "KALSHI_PRIVATE_KEY environment variables or pass directly."
+            )
+
+        self.auth = KalshiAuth(api_key, private_key)
         self.base_url = self.DEMO_URL if env == "demo" else self.PROD_URL
         self._session: Optional[aiohttp.ClientSession] = None
 
@@ -163,18 +188,22 @@ class KalshiRESTClient:
             params={"depth": depth},
         )
 
+        orderbook_data = resp.get("orderbook", {})
+        yes_data = orderbook_data.get("yes") or []
+        no_data = orderbook_data.get("no") or []
+
         return KalshiOrderbook(
             market_ticker=ticker,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             yes_bids=[
                 PriceLevel(price=lvl[0], quantity=lvl[1])
-                for lvl in resp.get("orderbook", {}).get("yes", [])
-                if len(lvl) >= 2
+                for lvl in yes_data
+                if isinstance(lvl, (list, tuple)) and len(lvl) >= 2
             ],
             yes_asks=[
                 PriceLevel(price=lvl[0], quantity=lvl[1])
-                for lvl in resp.get("orderbook", {}).get("no", [])
-                if len(lvl) >= 2
+                for lvl in no_data
+                if isinstance(lvl, (list, tuple)) and len(lvl) >= 2
             ],
         )
 
@@ -270,15 +299,26 @@ class KalshiWebSocketClient:
     """Kalshi WebSocket client for real-time data."""
 
     DEMO_WS_URL = "wss://demo-api.kalshi.co/trade-api/ws/v2"
-    PROD_WS_URL = "wss://trading-api.kalshi.com/trade-api/ws/v2"
+    PROD_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
     def __init__(
         self,
-        api_key: str,
-        api_secret: str,
-        env: str = "demo",
+        api_key: Optional[str] = None,
+        private_key: Optional[str] = None,
+        env: Optional[str] = None,
     ):
-        self.auth = KalshiAuth(api_key, api_secret)
+        # Load from environment if not provided
+        api_key = api_key or os.getenv("KALSHI_API_KEY")
+        private_key = private_key or os.getenv("KALSHI_PRIVATE_KEY")
+        env = env or os.getenv("KALSHI_ENV", "prod")
+
+        if not api_key or not private_key:
+            raise ValueError(
+                "Kalshi credentials required. Set KALSHI_API_KEY and "
+                "KALSHI_PRIVATE_KEY environment variables or pass directly."
+            )
+
+        self.auth = KalshiAuth(api_key, private_key)
         self.ws_url = self.DEMO_WS_URL if env == "demo" else self.PROD_WS_URL
         self._ws: Optional[WebSocketClientProtocol] = None
         self._running = False
@@ -395,7 +435,7 @@ class KalshiWebSocketClient:
         msg = data.get("msg", {})
         return KalshiOrderbook(
             market_ticker=msg.get("market_ticker", ""),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             yes_bids=[
                 PriceLevel(price=lvl[0], quantity=lvl[1])
                 for lvl in msg.get("yes", [])
@@ -413,7 +453,7 @@ class KalshiWebSocketClient:
         msg = data.get("msg", {})
         return KalshiTrade(
             market_ticker=msg.get("market_ticker", ""),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             price=msg.get("yes_price", 0),
             quantity=msg.get("count", 0),
             taker_side=Side.BUY if msg.get("taker_side") == "yes" else Side.SELL,

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from datetime import datetime, date
 from typing import AsyncIterator, Callable, Optional
 
@@ -21,8 +22,13 @@ ES_DATASET = "GLBX.MDP3"  # CME Globex
 class DatabentoClient:
     """Client for Databento market data feeds."""
 
-    def __init__(self, api_key: str):
-        self.api_key = api_key
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("DATABENTO_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "Databento API key required. Set DATABENTO_API_KEY "
+                "environment variable or pass directly."
+            )
         self._live_client: Optional[db.Live] = None
         self._historical_client: Optional[db.Historical] = None
         self._callbacks: dict[str, list[Callable]] = {

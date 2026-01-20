@@ -25,9 +25,12 @@ class OrderStatus(Enum):
 
 class MarketStatus(Enum):
     """Kalshi market status."""
+    ACTIVE = "active"
     OPEN = "open"
     CLOSED = "closed"
     SETTLED = "settled"
+    FINALIZED = "finalized"
+    PENDING = "pending"
 
 
 @dataclass(frozen=True)
